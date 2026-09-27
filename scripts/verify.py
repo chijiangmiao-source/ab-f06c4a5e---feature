@@ -150,6 +150,78 @@ def main():
     check("违规同样保存并可按编号读取",
           body.get("id") and http("GET", f"/checks/{body['id']}")[0] == 200)
 
+    # ---- 规范最短违规执行审计 ----
+    v_id = body["id"]
+    orig_total = v["prefix_length"] + v["cycle_length"]
+    status, audit = http("POST", f"/checks/{v_id}/audits")
+    cl = audit.get("canonical_lasso", {})
+    check("违规复核可发起规范最短审计 201",
+          status == 201 and audit.get("id", "").startswith("AUD-"),
+          f"status={status} body={audit}")
+    check("规范套索总切换数不超过原任意套索",
+          cl.get("total_switches", 10 ** 9) <= orig_total,
+          f"{cl.get('total_switches')} vs {orig_total}")
+    check("规范套索闭环非空", cl.get("cycle_length", 0) >= 1)
+    asteps = cl.get("steps", [])
+    check("审计每步含位置/切换/公平集命中证据",
+          bool(asteps) and all(
+              s.get("location") and s.get("switch_taken")
+              and isinstance(s.get("fairness_hits"), list) for s in asteps))
+    cov = cl.get("loop_fairness_coverage", {})
+    check("审计闭环在循环内命中每个公平集",
+          len(cov) == audit.get("fairness_set_count")
+          and all(idxs for idxs in cov.values()), str(cov))
+    # 独立重放：每步切换真实存在且闭环闭合
+    edge = {(sw["source"], sw["id"]): sw["target"] for sw in STARVATION["switches"]}
+    am = cl.get("loop_start_index", 0)
+    replay_ok = bool(asteps)
+    for i, s in enumerate(asteps):
+        dst = edge.get((s["location"], s["switch_taken"]))
+        nxt = (asteps[i + 1]["location"] if i + 1 < len(asteps)
+               else asteps[am]["location"])
+        if dst != nxt:
+            replay_ok = False
+    check("审计套索每条边真实存在且闭环闭合", replay_ok)
+    status, audit2 = http("POST", f"/checks/{v_id}/audits")
+    check("审计可稳定复现（同一规范套索，新审计编号）",
+          status == 201 and audit2.get("id") != audit.get("id")
+          and audit2.get("canonical_lasso") == cl)
+    status, detail = http("GET", f"/checks/{v_id}/audits/{audit['id']}")
+    check("按编号读取审计详情",
+          status == 200 and detail.get("id") == audit["id"]
+          and detail.get("canonical_lasso") == cl)
+    status, listing = http("GET", f"/checks/{v_id}/audits")
+    check("审计列表含两次审计",
+          status == 200 and len(listing.get("audits", [])) == 2)
+    status, again = http("GET", f"/checks/{v_id}")
+    check("审计不改写来源复核",
+          status == 200 and again.get("violation") == v
+          and again.get("holds") is False)
+    status, b5 = http("POST", f"/checks/{ok_id}/audits")
+    check("成立来源拒绝审计 409 且不新增",
+          status == 409 and b5.get("error") == "source_holds"
+          and http("GET", f"/checks/{ok_id}/audits")[1].get("audits") == [])
+    status, b6 = http("POST", "/checks/CHK-999999/audits")
+    check("缺失编号拒绝审计 404",
+          status == 404 and b6.get("error") == "not_found")
+    too_many_fair = {
+        "locations": ["a", "b"], "initial": "a",
+        "switches": [
+            {"id": "aa", "source": "a", "target": "a"},
+            {"id": "ab", "source": "a", "target": "b"},
+            {"id": "bb", "source": "b", "target": "b"},
+        ],
+        "propositions": {"a": [], "b": [f"p{i}" for i in range(7)]},
+        "formula": " | ".join(f"G p{i}" for i in range(7)),
+    }
+    status, b7 = http("POST", "/checks", too_many_fair)
+    seven_id = b7.get("id")
+    status, b8 = http("POST", f"/checks/{seven_id}/audits")
+    check("公平集超限拒绝审计 422 且不新增",
+          status == 422 and b8.get("error") == "fairness_limit_exceeded"
+          and http("GET", f"/checks/{seven_id}/audits")[1].get("audits") == [],
+          f"status={status} body={b8}")
+
     bad = json.loads(json.dumps(STARVATION))
     bad["switches"] = bad["switches"][:2]  # deny/grant 变死端
     status, body = http("POST", "/checks", bad)

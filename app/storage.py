@@ -1,6 +1,7 @@
 """复核审计的持久化存储（JSON 文件，线程安全）。
 
 复核成功后保存编号与结论；非法请求在校验阶段即被拒绝，不生成编号、不落审计。
+规范最短违规执行审计单独编号（AUD-）持久化，不改写来源复核记录。
 """
 
 from __future__ import annotations
@@ -49,3 +50,27 @@ class AuditStore:
         with self._lock:
             ids = list(self._read()["records"].keys())
         return sorted(ids)
+
+    # ---- 规范最短违规执行审计（不改写来源复核记录）----
+    def save_audit(self, check_id: str, record: Dict[str, Any]) -> str:
+        """为复核 check_id 保存一条规范最短违规执行审计，返回审计编号。"""
+        with self._lock:
+            data = self._read()
+            audits = data.setdefault("audits", {})
+            data["audit_seq"] = int(data.get("audit_seq", 0)) + 1
+            audit_id = f"AUD-{data['audit_seq']:06d}"
+            record = {"id": audit_id, "check_id": check_id, **record}
+            audits[audit_id] = record
+            self._write_locked(data)
+        return audit_id
+
+    def get_audit(self, audit_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._read().get("audits", {}).get(audit_id)
+
+    def list_audits(self, check_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            audits = self._read().get("audits", {})
+            out = [r for r in audits.values()
+                   if r.get("check_id") == check_id]
+        return sorted(out, key=lambda r: r["id"])

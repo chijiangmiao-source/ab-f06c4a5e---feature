@@ -25,17 +25,36 @@
 tableau 完全独立：直接枚举位置图上的简单前缀+闭环行走，按周期语义求值），
 零分歧；另加约 2.6 千个多公平集专项用例。
 
+## 规范最短违规执行审计（不成立复核的二次精确求解）
+
+对已读取为**不成立**的复核，可发起规范最短违规执行审计：服务**冻结来源
+规程、公式与初态**（复核落库时保存 `spec` 快照，审计不读新输入、不改写
+来源复核），重新使用现有否定 GBA 与规程乘积，在公平集 **≤ 6** 时**精确**
+求解总切换数最小的可达接受套索：
+
+- **精确最短**：公平集命中展开为 2^k 掩码层，在**乘积图**（位置 × GBA
+  基本集）上逐候选入口求最短覆盖闭环（接受 SCC 限制 + 以来源任意套索
+  长度为上界的分支限界）。不凭深度回放、不凭随机样本、不只在原位置图
+  找环。
+- **规范裁决**：同长度下依次按前缀、闭环的切换标识序列字典序裁决，
+  乘积状态签名兜底——结果唯一、可稳定复现（重复发起得到同一套索）。
+- **证据**：闭环非空、每条边真实存在、闭环内命中每个公平集；产出前
+  独立重放验证；读取结果给出每步位置、切换与公平集命中。
+- **拒绝且不新增审计**：来源成立（409 `source_holds`）、编号缺失
+  （404 `not_found`）、公平集超过 6 个（422 `fairness_limit_exceeded`）。
+
 ## 目录
 
 ```
 app/ltl_parser.py   LTL 词法/语法解析、AST、子式索引
 app/checker.py      NNF 规范化、按需 GBA、乘积、SCC、套索、子式真值证据
+app/audit.py        规范最短违规执行审计（精确最短接受套索 + 字典序裁决）
 app/validation.py   结构/公式校验（定位拒绝，非法不生成审计）
-app/storage.py      审计编号持久化（JSON，原子写，线程安全）
+app/storage.py      复核与审计编号持久化（JSON，原子写，线程安全）
 app/server.py       零第三方依赖的 HTTP 服务（标准库）
 app/healthcheck.py  容器健康检查脚本
 scripts/verify.py   Compose verify：构建检查 + 单元测试 + HTTP 冒烟
-tests/              38 个 unittest 用例
+tests/              54 个 unittest 用例
 examples/           合规与违规（永不放行闭环）两个示例
 Dockerfile          python:3.11-slim，零 pip 依赖，带 HEALTHCHECK
 docker-compose.yml  ltl 服务 + verify 验收服务
@@ -64,6 +83,9 @@ docker-compose.yml  ltl 服务 + verify 验收服务
 |---|---|---|
 | `POST` | `/checks` | 提交复核；成功返回 201 并分配编号，非法输入返回 400 且**不**生成审计 |
 | `GET`  | `/checks/<id>` | 按编号读取：成立结论，或带每步位置/切换/子式真值的违规套索 |
+| `POST` | `/checks/<id>/audits` | 对**不成立**的复核发起规范最短违规执行审计；201 分配 `AUD-` 编号 |
+| `GET`  | `/checks/<id>/audits` | 列出该复核的规范最短违规执行审计 |
+| `GET`  | `/checks/<id>/audits/<aid>` | 读取审计详情：每步位置/切换/公平集命中证据 |
 | `GET`  | `/health` | 健康检查 |
 
 合规结果：`{"id","formula","initial","holds":true,"normalization":{
@@ -73,6 +95,13 @@ docker-compose.yml  ltl 服务 + verify 验收服务
 `loop_start_index`、`steps[]`（每步 `location`、`switch_taken`、
 `propositions`、`subformula_truth`、`formula_true_here`、
 `negation_automaton_formulas`）与说明 `note`。
+
+审计结果（`POST /checks/<id>/audits` 及详情读取）含 `fairness_set_count`、
+`fairness_sets[]`（事件性描述）、`canonical_lasso`（`total_switches`、
+`prefix_switches`、`cycle_switches`、`steps[]`——每步 `location`、
+`switch_taken`、`fairness_hits`、`loop_fairness_coverage` 与独立重放
+`verification`）、`comparison`（相对来源任意套索节省的切换数）与
+`frozen_spec`（冻结的来源快照）。
 
 ## 运行
 
@@ -89,7 +118,11 @@ curl -s -X POST localhost:9090/checks -H 'Content-Type: application/json' \
 # 按编号读取
 curl -s localhost:9090/checks/CHK-000001
 
-# 验收（构建检查 + 38 单测 + HTTP 冒烟，围绕永不放行违规闭环），退出码报告
+# 对不成立的复核发起/读取规范最短违规执行审计
+curl -s -X POST localhost:9090/checks/CHK-000002/audits
+curl -s localhost:9090/checks/CHK-000002/audits/AUD-000001
+
+# 验收（构建检查 + 54 单测 + HTTP 冒烟，围绕永不放行违规闭环及其规范最短审计），退出码报告
 docker compose up --build verify
 # 自定义端口：
 LTL_PORT=8090 LTL_HOST_PORT=9090 docker compose up --build verify
@@ -104,6 +137,10 @@ LTL_PORT=8090 LTL_HOST_PORT=9090 docker compose up --build verify
 - 公式含未声明命题、非法字符、括号错配、运算符缺操作数、括号外裸 `U` 等。
 
 错误形如：`{"error":"validation_failed","errors":["位置 'b' 没有外出切换（死端，禁止）", ...]}`。
+
+审计发起的拒绝（同样不新增审计）：来源复核成立（409 `source_holds`）、
+复核编号缺失（404 `not_found`）、否定公式产生的公平集超过 6 个
+（422 `fairness_limit_exceeded`）。
 
 ## 本地开发（无需 Docker）
 
