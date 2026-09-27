@@ -26,7 +26,8 @@ services:
         condition: service_healthy
     environment:
       LTL_BASE_URL: "http://ltl:${LTL_PORT:-8080}"
-    # 围绕永不放行的违规闭环做：代码测试 + 构建检查 + HTTP 冒烟；
+    # 围绕永不放行的违规闭环做：代码测试 + 构建检查 + HTTP 冒烟
+    # （含规范最短违规执行审计：最短化成功与 409/404/422 拒绝链路）；
     # 验收完即退出，退出码即验收结论（0 通过 / 非 0 失败）
     entrypoint: ["python", "/srv/scripts/verify.py"]
     restart: "no"

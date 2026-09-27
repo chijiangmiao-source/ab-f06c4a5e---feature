@@ -3,7 +3,11 @@
 
 1. 构建检查：全部源码可编译（字节码语法检查）；
 2. 代码测试：unittest 全量用例（含永不放行违规闭环检测）；
-3. HTTP 冒烟：健康检查、成立结论、违规闭环证据、非法请求 400 且无审计、编号读取。
+3. HTTP 冒烟：健康检查、成立结论、违规闭环证据、非法请求 400 且无审计、
+   编号读取；
+4. 规范最短违规执行审计：对违规复核发起最短化（总切换数不劣于原任意
+   套索、闭环非空、每步公平集命中证据、按编号可读、来源不被改写），
+   来源成立 409 / 编号缺失 404 / 公平集超限 422 且均不新增审计。
 
 任一步失败即以非零退出码退出。
 """
@@ -78,6 +82,26 @@ COMPLIANT = {
                      "grant": ["request", "granted"]},
     "formula": "G(!request | F granted)",
 }
+
+# 否定 NNF 为 F!a1 | ... | F!a7：7 个公平集，超过最短审计上限 6
+SEVEN_FAIRNESS = {
+    "locations": ["a", "b"],
+    "initial": "a",
+    "switches": [
+        {"id": "ab", "source": "a", "target": "b"},
+        {"id": "ba", "source": "b", "target": "a"},
+    ],
+    "propositions": {
+        "a": [],
+        "b": ["a1", "a2", "a3", "a4", "a5", "a6", "a7"],
+    },
+    "formula": "G a1 & G a2 & G a3 & G a4 & G a5 & G a6 & G a7",
+}
+
+
+def next_id(audit_id):
+    prefix, num = audit_id.rsplit("-", 1)
+    return f"{prefix}-{int(num) + 1:06d}"
 
 
 def main():
@@ -171,6 +195,69 @@ def main():
 
     status, body = http("GET", "/checks/CHK-000000")
     check("不存在编号 404", status == 404)
+
+    # ---- 规范最短违规执行审计 ----
+    section("规范最短违规执行审计")
+    status, body = http("POST", "/checks", STARVATION)
+    src_id = body.get("id")
+    src_v = body.get("violation") or {}
+    src_total = src_v.get("prefix_length", 0) + src_v.get("cycle_length", 0)
+    check("审计来源（违规闭环）创建 201 且 holds=false",
+          status == 201 and body.get("holds") is False and src_id)
+
+    status, audit = http("POST", f"/checks/{src_id}/shortest-violation")
+    av = audit.get("violation") or {}
+    asteps = av.get("steps", [])
+    am = av.get("loop_start_index")
+    acov = av.get("fairness_coverage", [])
+    check("最短违规审计 201 且引用来源",
+          status == 201 and audit.get("holds") is False
+          and audit.get("source_check_id") == src_id and audit.get("id"))
+    check("最短套索闭环非空且不劣于原任意套索",
+          av.get("cycle_length", 0) >= 1
+          and av.get("total_switches", 10**9) <= src_total)
+    check("审计每步含位置/切换/公平集命中证据",
+          bool(asteps) and all(
+              isinstance(s.get("location"), str)
+              and s.get("switch_taken")
+              and isinstance(s.get("fairness_sets_hit"), list)
+              for s in asteps))
+    check("每个公平集均在闭环内命中",
+          bool(acov) and am is not None and all(
+              any(isinstance(i, int) and am <= i < len(asteps)
+                  for i in c.get("hit_step_indices", []))
+              for c in acov))
+    check("最短闭环上公式逐点为假（无限违规）",
+          am is not None
+          and all(s.get("formula_true_here") is False for s in asteps[am:]))
+    check("审计可按编号读取且来源复核不被改写",
+          bool(audit.get("id"))
+          and http("GET", f"/checks/{audit['id']}")[0] == 200
+          and http("GET", f"/checks/{src_id}")[1]
+          .get("violation", {}).get("kind") == "lasso")
+
+    status, ok_body = http("POST", "/checks", COMPLIANT)
+    ok_id2 = ok_body.get("id")
+    status, body = http("POST", f"/checks/{ok_id2}/shortest-violation")
+    check("来源成立拒绝审计 409 且不新增审计",
+          status == 409 and "id" not in body)
+
+    status, body = http("POST", "/checks/CHK-000000/shortest-violation")
+    check("缺失编号拒绝审计 404", status == 404)
+
+    status, seven = http("POST", "/checks", SEVEN_FAIRNESS)
+    seven_id = seven.get("id")
+    check("七公平集违规复核本身仍可判定",
+          status == 201 and seven.get("holds") is False
+          and seven.get("stats", {}).get("fairness_sets") == 7)
+    status, body = http("POST", f"/checks/{seven_id}/shortest-violation")
+    check("公平集超限拒绝审计 422 且不新增审计",
+          status == 422 and body.get("error") == "fairness_limit_exceeded"
+          and "id" not in body)
+    status, tail = http("POST", "/checks", COMPLIANT)
+    check("各项拒绝均未占用审计编号",
+          status == 201 and bool(seven_id)
+          and tail.get("id") == next_id(seven_id))
 
     section("汇总")
     if FAILURES:

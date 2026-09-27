@@ -30,12 +30,13 @@ tableau 完全独立：直接枚举位置图上的简单前缀+闭环行走，�
 ```
 app/ltl_parser.py   LTL 词法/语法解析、AST、子式索引
 app/checker.py      NNF 规范化、按需 GBA、乘积、SCC、套索、子式真值证据
+app/shortest.py     规范最短违规执行审计：精确最短接受套索求解与证据
 app/validation.py   结构/公式校验（定位拒绝，非法不生成审计）
 app/storage.py      审计编号持久化（JSON，原子写，线程安全）
 app/server.py       零第三方依赖的 HTTP 服务（标准库）
 app/healthcheck.py  容器健康检查脚本
 scripts/verify.py   Compose verify：构建检查 + 单元测试 + HTTP 冒烟
-tests/              38 个 unittest 用例
+tests/              49 个 unittest 用例
 examples/           合规与违规（永不放行闭环）两个示例
 Dockerfile          python:3.11-slim，零 pip 依赖，带 HEALTHCHECK
 docker-compose.yml  ltl 服务 + verify 验收服务
@@ -64,6 +65,7 @@ docker-compose.yml  ltl 服务 + verify 验收服务
 |---|---|---|
 | `POST` | `/checks` | 提交复核；成功返回 201 并分配编号，非法输入返回 400 且**不**生成审计 |
 | `GET`  | `/checks/<id>` | 按编号读取：成立结论，或带每步位置/切换/子式真值的违规套索 |
+| `POST` | `/checks/<id>/shortest-violation` | 对结论为**不成立**的复核发起规范最短违规执行审计（见下节） |
 | `GET`  | `/health` | 健康检查 |
 
 合规结果：`{"id","formula","initial","holds":true,"normalization":{
@@ -72,7 +74,33 @@ docker-compose.yml  ltl 服务 + verify 验收服务
 违规结果额外含 `violation`：`prefix_length`、`cycle_length`、
 `loop_start_index`、`steps[]`（每步 `location`、`switch_taken`、
 `propositions`、`subformula_truth`、`formula_true_here`、
-`negation_automaton_formulas`）与说明 `note`。
+`negation_automaton_formulas`）与说明 `note`。复核记录同时冻结
+`spec`（规程/公式/初态），供最短化审计精确重放。
+
+## 规范最短违规执行审计
+
+对已读取为**不成立**的复核，`POST /checks/<id>/shortest-violation`
+（无需请求体）发起最短化审计：**冻结来源规程、公式和初态**，重新使用
+现有否定 GBA 与规程乘积，在乘积图上**精确**求全部可达接受套索中
+**总切换数最小**的前缀 + 闭环——不凭深度回放、不随机采样、不只在原
+位置图上找环：
+
+- 闭环**非空**、每条边真实存在，并在循环内命中**每个**公平集；
+- 同长度下依次按**前缀**、**闭环**的切换标识序列字典序裁决，结果
+  确定、可稳定复现（重复发起得到相同证据）；
+- 公平集个数不超过 **6** 时受理（子集掩码 2^k 展开精确求解）；
+- 来源复核记录**不被改写**；审计成功返回 201 并分配新编号，可经
+  `GET /checks/<新编号>` 读取。
+
+审计记录的 `violation`（`kind:"minimal_lasso"`）含 `total_switches`、
+每步 `location`/`switch_taken`/`fairness_sets_hit` 等证据，以及
+`fairness_coverage`（每个公平集在闭环内的命中下标汇总）。
+
+拒绝情形（均**不**新增审计）：
+
+- 来源复核结论为成立 → `409 {"error":"source_not_violation"}`；
+- 编号不存在 → `404 {"error":"not_found"}`；
+- 否定 GBA 公平集超过 6 个 → `422 {"error":"fairness_limit_exceeded"}`。
 
 ## 运行
 
@@ -89,7 +117,11 @@ curl -s -X POST localhost:9090/checks -H 'Content-Type: application/json' \
 # 按编号读取
 curl -s localhost:9090/checks/CHK-000001
 
-# 验收（构建检查 + 38 单测 + HTTP 冒烟，围绕永不放行违规闭环），退出码报告
+# 对违规复核发起规范最短违规执行审计（取得更短且可复现的前缀+闭环；
+# 假设上一步 violation.json 分配到编号 CHK-000002）
+curl -s -X POST localhost:9090/checks/CHK-000002/shortest-violation
+
+# 验收（构建检查 + 49 单测 + HTTP 冒烟，围绕永不放行违规闭环及其最短化审计），退出码报告
 docker compose up --build verify
 # 自定义端口：
 LTL_PORT=8090 LTL_HOST_PORT=9090 docker compose up --build verify
