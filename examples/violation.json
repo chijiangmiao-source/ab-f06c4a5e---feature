@@ -1,0 +1,19 @@
+{
+  "_comment": "违规规程：req 可不经 grant 直接回 idle（迟发闭环），也可进 deny 永不放行；同一公式被判不成立并返回套索证据",
+  "locations": ["idle", "req", "deny", "grant"],
+  "initial": "idle",
+  "switches": [
+    {"id": "t_apply",  "source": "idle",  "target": "req"},
+    {"id": "t_late",   "source": "req",   "target": "idle"},
+    {"id": "t_deny",   "source": "req",   "target": "deny"},
+    {"id": "t_back",   "source": "deny", "target": "idle"},
+    {"id": "t_clear",  "source": "grant", "target": "idle"}
+  ],
+  "propositions": {
+    "idle":  [],
+    "req":   ["request"],
+    "deny":  ["denied"],
+    "grant": ["granted"]
+  },
+  "formula": "G(!request | F granted)"
+}

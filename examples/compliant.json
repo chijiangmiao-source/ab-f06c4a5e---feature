@@ -1,0 +1,16 @@
+{
+  "_comment": "合规规程：每次 request 必经 grant（granted）才返回 idle，公式 G(!request | F granted) 成立",
+  "locations": ["idle", "req", "grant"],
+  "initial": "idle",
+  "switches": [
+    {"id": "t_apply",  "source": "idle",  "target": "req"},
+    {"id": "t_permit", "source": "req",   "target": "grant"},
+    {"id": "t_clear",  "source": "grant", "target": "idle"}
+  ],
+  "propositions": {
+    "idle":  [],
+    "req":   ["request"],
+    "grant": ["request", "granted"]
+  },
+  "formula": "G(!request | F granted)"
+}
